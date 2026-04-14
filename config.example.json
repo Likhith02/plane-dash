@@ -1,0 +1,26 @@
+{
+  "checkIntervalSeconds": 60,
+  "cooldownSeconds": 300,
+  "rules": [
+    {
+      "market": "crypto",
+      "symbol": "bitcoin",
+      "label": "BTC",
+      "condition": "below",
+      "target": 90000
+    },
+    {
+      "market": "crypto",
+      "symbol": "ethereum",
+      "label": "ETH",
+      "condition": "below",
+      "target": 4500
+    },
+    {
+      "market": "stock",
+      "symbol": "AAPL",
+      "condition": "above",
+      "target": 250
+    }
+  ]
+}
