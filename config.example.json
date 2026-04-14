@@ -1,6 +1,12 @@
 {
   "checkIntervalSeconds": 60,
   "cooldownSeconds": 300,
+  "changeAlerts": {
+    "enabled": true,
+    "mode": "any",
+    "minPercent": 0,
+    "cooldownSeconds": 60
+  },
   "rules": [
     {
       "market": "crypto",

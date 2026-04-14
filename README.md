@@ -6,6 +6,7 @@ A lightweight Node.js bot that checks live market prices and alerts when your ru
 
 - Tracks stocks and crypto symbols
 - Supports threshold rules (`above` / `below`)
+- Optional automatic change alerts between checks (`changeAlerts`)
 - Cooldown per rule to avoid alert spam
 - Optional one-shot mode for a single check
 - Optional Telegram bot notifications (`TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`)
@@ -70,6 +71,12 @@ You can trigger an immediate check from the "Check Now" button.
 {
   "checkIntervalSeconds": 60,
   "cooldownSeconds": 300,
+  "changeAlerts": {
+    "enabled": true,
+    "mode": "any",
+    "minPercent": 0,
+    "cooldownSeconds": 60
+  },
   "rules": [
     {
       "market": "crypto",
@@ -92,6 +99,10 @@ You can trigger an immediate check from the "Check Now" button.
 - For `stock`, `symbol` can be `AAPL` (the bot auto-converts to `AAPL.US` for lookup).
 - For `crypto`, use CoinGecko coin IDs (`bitcoin`, `ethereum`, `solana`, etc.).
 - `label` is optional and only affects alert display text.
+- `changeAlerts.enabled`: enable/disable automatic change alerts.
+- `changeAlerts.mode`: `any`, `up`, or `down`.
+- `changeAlerts.minPercent`: minimum move needed since previous check (set `0` for any change).
+- `changeAlerts.cooldownSeconds`: cooldown for change alerts per symbol.
 
 ## Telegram Alerts (Optional)
 

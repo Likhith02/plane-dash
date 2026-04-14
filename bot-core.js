@@ -27,6 +27,11 @@ function formatPrice(value) {
   }).format(value);
 }
 
+function formatPercent(value) {
+  const sign = value > 0 ? '+' : '';
+  return `${sign}${value.toFixed(2)}%`;
+}
+
 function validateConfig(rawConfig) {
   if (!rawConfig || typeof rawConfig !== 'object') {
     throw new Error('Config must be a JSON object');
@@ -45,6 +50,28 @@ function validateConfig(rawConfig) {
 
   if (!Array.isArray(rawConfig.rules) || rawConfig.rules.length === 0) {
     throw new Error('rules must be a non-empty array');
+  }
+
+  const rawChangeAlerts = rawConfig.changeAlerts ?? {};
+  if (rawChangeAlerts && typeof rawChangeAlerts !== 'object') {
+    throw new Error('changeAlerts must be an object when provided');
+  }
+
+  const changeAlertsEnabled = Boolean(rawChangeAlerts.enabled ?? false);
+  const changeAlertsMode = String(rawChangeAlerts.mode ?? 'any').trim().toLowerCase();
+  const changeAlertsMinPercent = Number(rawChangeAlerts.minPercent ?? 0);
+  const changeAlertsCooldownSeconds = Number(rawChangeAlerts.cooldownSeconds ?? 0);
+
+  if (!['any', 'up', 'down'].includes(changeAlertsMode)) {
+    throw new Error('changeAlerts.mode must be "any", "up", or "down"');
+  }
+
+  if (!Number.isFinite(changeAlertsMinPercent) || changeAlertsMinPercent < 0) {
+    throw new Error('changeAlerts.minPercent must be a non-negative number');
+  }
+
+  if (!Number.isFinite(changeAlertsCooldownSeconds) || changeAlertsCooldownSeconds < 0) {
+    throw new Error('changeAlerts.cooldownSeconds must be a non-negative number');
   }
 
   const rules = rawConfig.rules.map((rule, index) => {
@@ -92,6 +119,12 @@ function validateConfig(rawConfig) {
   return {
     checkIntervalMs: Math.floor(checkIntervalSeconds * 1000),
     cooldownMs: Math.floor(cooldownSeconds * 1000),
+    changeAlerts: {
+      enabled: changeAlertsEnabled,
+      mode: changeAlertsMode,
+      minPercent: changeAlertsMinPercent,
+      cooldownMs: Math.floor(changeAlertsCooldownSeconds * 1000)
+    },
     rules
   };
 }
@@ -288,6 +321,8 @@ class PriceWatchMonitor extends EventEmitter {
     this.maxAlertHistory = maxAlertHistory;
     this.timer = null;
     this.lastAlertAt = new Map();
+    this.lastChangeAlertAt = new Map();
+    this.lastSeenPrice = new Map();
     this.checkInProgress = false;
     this.lastCheckAt = null;
     this.nextCheckAt = null;
@@ -323,6 +358,7 @@ class PriceWatchMonitor extends EventEmitter {
       const prices = await fetchPricesForRules(this.config.rules);
       const ruleResults = [];
       const newAlerts = [];
+      const uniqueSymbolEntries = new Map();
 
       for (const rule of this.config.rules) {
         const currentPrice = prices.get(lookupKey(rule));
@@ -360,6 +396,17 @@ class PriceWatchMonitor extends EventEmitter {
           cooldownRemainingMs
         });
 
+        const symbolLookup = lookupKey(rule);
+        if (!uniqueSymbolEntries.has(symbolLookup)) {
+          uniqueSymbolEntries.set(symbolLookup, {
+            lookup: symbolLookup,
+            market: rule.market,
+            symbol: rule.symbol,
+            displaySymbol: rule.displaySymbol,
+            currentPrice
+          });
+        }
+
         if (!triggered || onCooldown) {
           continue;
         }
@@ -372,6 +419,7 @@ class PriceWatchMonitor extends EventEmitter {
 
         newAlerts.push({
           id: `${startedAt}-${newAlerts.length + 1}`,
+          type: 'threshold',
           createdAt: checkedAtIso,
           createdAtLabel: nowLabel(new Date(startedAt)),
           message,
@@ -382,6 +430,70 @@ class PriceWatchMonitor extends EventEmitter {
           currentPrice,
           telegramSent
         });
+      }
+
+      if (this.config.changeAlerts.enabled) {
+        for (const entry of uniqueSymbolEntries.values()) {
+          const previousPrice = this.lastSeenPrice.get(entry.lookup);
+          this.lastSeenPrice.set(entry.lookup, entry.currentPrice);
+
+          if (!Number.isFinite(previousPrice) || previousPrice === 0) {
+            continue;
+          }
+
+          const delta = entry.currentPrice - previousPrice;
+          if (delta === 0) {
+            continue;
+          }
+
+          const percentChange = (delta / previousPrice) * 100;
+          const absPercentChange = Math.abs(percentChange);
+
+          if (this.config.changeAlerts.mode === 'up' && delta <= 0) {
+            continue;
+          }
+
+          if (this.config.changeAlerts.mode === 'down' && delta >= 0) {
+            continue;
+          }
+
+          if (absPercentChange < this.config.changeAlerts.minPercent) {
+            continue;
+          }
+
+          const lastChangeAlert = this.lastChangeAlertAt.get(entry.lookup) ?? 0;
+          const onChangeCooldown =
+            this.config.changeAlerts.cooldownMs > 0 &&
+            startedAt - lastChangeAlert < this.config.changeAlerts.cooldownMs;
+
+          if (onChangeCooldown) {
+            continue;
+          }
+
+          this.lastChangeAlertAt.set(entry.lookup, startedAt);
+          const direction = delta > 0 ? 'increased' : 'decreased';
+          const message = `[CHANGE ALERT] ${entry.displaySymbol} (${entry.market}) ${direction} ${formatPercent(percentChange)} since last check. Previous: ${formatPrice(previousPrice)} | Current: ${formatPrice(entry.currentPrice)} (${nowLabel(new Date(startedAt))})`;
+          const telegramSent = await postTelegram(this.telegramBotToken, this.telegramChatId, message);
+
+          newAlerts.push({
+            id: `${startedAt}-${newAlerts.length + 1}`,
+            type: 'change',
+            createdAt: checkedAtIso,
+            createdAtLabel: nowLabel(new Date(startedAt)),
+            message,
+            market: entry.market,
+            displaySymbol: entry.displaySymbol,
+            previousPrice,
+            currentPrice: entry.currentPrice,
+            delta,
+            percentChange,
+            telegramSent
+          });
+        }
+      } else {
+        for (const entry of uniqueSymbolEntries.values()) {
+          this.lastSeenPrice.set(entry.lookup, entry.currentPrice);
+        }
       }
 
       this.lastCheckAt = checkedAtIso;
@@ -457,6 +569,12 @@ class PriceWatchMonitor extends EventEmitter {
       configPath: this.configPath,
       checkIntervalSeconds: Math.round(this.config.checkIntervalMs / 1000),
       cooldownSeconds: Math.round(this.config.cooldownMs / 1000),
+      changeAlerts: {
+        enabled: this.config.changeAlerts.enabled,
+        mode: this.config.changeAlerts.mode,
+        minPercent: this.config.changeAlerts.minPercent,
+        cooldownSeconds: Math.round(this.config.changeAlerts.cooldownMs / 1000)
+      },
       running: Boolean(this.timer),
       checkInProgress: this.checkInProgress,
       lastCheckAt: this.lastCheckAt,
